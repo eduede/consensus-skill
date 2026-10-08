@@ -25,6 +25,9 @@ retired and must not be recreated.
   through main-suite integration or a separate release-gate invocation.
 - `references/OPERATIONS.md` documents artifacts and recovery semantics.
 - `agents/openai.yaml` supplies Codex UI metadata.
+- `gui/consensus_gui.py` and `gui/index.html` provide an optional local browser
+  GUI that launches the unchanged runner; `gui/test_gui.py` tests it offline
+  with a fake runner.
 
 ## Required invariants
 
@@ -118,8 +121,10 @@ Run all of the following after changing the skill or runner:
 ```bash
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" .
 python3 -m py_compile scripts/consensus scripts/test_consensus.py \
-  scripts/test_hardening.py scripts/test_lifecycle.py
+  scripts/test_hardening.py scripts/test_lifecycle.py \
+  gui/consensus_gui.py gui/test_gui.py
 python3 scripts/test_consensus.py
+python3 gui/test_gui.py
 # Run each helper separately unless the main suite invokes it:
 python3 scripts/test_hardening.py
 python3 scripts/test_lifecycle.py

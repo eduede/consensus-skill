@@ -149,6 +149,51 @@ Run `consensus --help` for the complete CLI reference. Important options are:
 - `--no-save`: do not write the Markdown transcript; the progress log, private
   journals for both participants, and protocol manifest are still written.
 
+## Browser GUI
+
+`gui/consensus_gui.py` is a small local web app around the same runner. It uses
+only the Python standard library and never calls a model itself. Link it next
+to the runner and start it:
+
+```bash
+ln -s "$CONSENSUS_REPO/gui/consensus_gui.py" ~/.local/bin/consensus-gui
+consensus-gui            # opens http://127.0.0.1:8765/?t=<token>
+```
+
+The page starts debates (question, context files, rounds, first speaker,
+sub-agents, synthesis) and can stop a running one (SIGTERM, which the runner
+handles like Ctrl-C). Each debate's page shows its configuration, then a live
+panel that follows the debate as it unfolds: Claude's text streams in as it is
+written, Codex's messages appear item by item, and thinking and tool calls
+(with their output) can be shown or hidden. The live panel is rebuilt locally
+from the two private stream journals and is never written anywhere else. The
+final transcript, progress log, and console output sit below it.
+Each debate can use a different model and effort for Claude and for Codex. The
+pickers start at the runner's defaults, suggest Claude models and the Codex
+models in `~/.codex/models_cache.json`, and accept any typed ID; choices that
+differ from the defaults reach the runner as the usual `CONSENSUS_*` overrides
+and are recorded in its manifest. The browser remembers the last selection.
+
+Dropped PDFs are transcribed by Claude before the debate starts. The GUI runs
+`claude -p` in a private staging folder (`~/consensus-runs/.pdf/<id>/`) with
+only the Read and Write tools; Claude reads at most 10 pages at a time, writes
+each chunk as a separate part (math as LaTeX, tables as Markdown, figures as
+bracketed descriptions), and the GUI joins the parts into one text context
+file you can open with "view" before starting. The model defaults to
+`claude-sonnet-5-5` at `medium` effort; override with
+`CONSENSUS_GUI_PDF_MODEL`, `CONSENSUS_GUI_PDF_EFFORT`, and
+`CONSENSUS_GUI_PDF_TIMEOUT` (seconds, default 1800). This uses your Claude
+account and sends the PDF to Anthropic, as the debate itself would.
+Each debate gets a private `0700` folder under `~/consensus-runs/` (override
+with `--runs-dir` or `CONSENSUS_GUI_RUNS_DIR`) holding the question, context
+copies, transcript, progress log, journals, manifest, and console output. The
+question reaches the runner through stdin, never its command line.
+
+The server listens only on `127.0.0.1` and requires the per-launch token in the
+printed URL; it also rejects foreign `Host` and `Origin` headers, so other web
+pages cannot start paid runs. Debates run in their own session: stopping the
+GUI leaves them running, and reopening it shows them again.
+
 ## Durability and convergence
 
 Both participants stream into separate runner-owned private fsynced journals.
