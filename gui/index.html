@@ -84,6 +84,16 @@ button:disabled { opacity: .5; cursor: default; }
 .s-running { color: var(--run); } .s-running .dot { animation: pulse 1.4s infinite; }
 .s-consensus { color: var(--ok); } .s-no-consensus { color: var(--warn); }
 .s-failed { color: var(--bad); } .s-interrupted, .s-ended { color: var(--muted); }
+.s-proof { color: var(--ok); }
+.modes { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; padding: 3px; gap: 3px; margin-bottom: 14px; }
+.modes button { border: 0; border-radius: 6px; padding: 6px 14px; background: none; color: var(--muted); }
+.modes button.on { background: var(--code); color: var(--ink); font-weight: 600; }
+.form.m-debate .proof-only, .form.m-proof .debate-only { display: none; }
+.writer { display: grid; grid-template-columns: 140px 1fr 110px; gap: 8px; }
+.writer label { margin: 8px 0 4px; font-size: 13px; }
+.kindtag { font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em;
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--muted); }
+.copy { margin-left: auto; font-size: 12.5px; padding: 3px 10px; }
 @keyframes pulse { 50% { opacity: .25; } }
 .runhead { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
 .runhead h2 { margin: 0 0 6px; font-size: 19px; }
@@ -142,7 +152,7 @@ pre.log { background: var(--code); border-radius: 8px; padding: 14px; font-size:
   .layout { grid-template-columns: 1fr; height: auto; }
   aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 260px; }
   .row { grid-template-columns: 1fr 1fr; }
-  .models, .cfggrid { grid-template-columns: 1fr; }
+  .models, .cfggrid, .writer { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -153,21 +163,40 @@ pre.log { background: var(--code); border-radius: 8px; padding: 14px; font-size:
 </header>
 <div class="layout">
   <aside>
-    <button class="primary new" id="newBtn">New debate</button>
+    <button class="primary new" id="newBtn">New run</button>
     <div id="runs"></div>
   </aside>
   <main id="main"></main>
 </div>
 
 <template id="formTpl">
-  <div class="card">
-    <h2 style="margin:0 0 4px;font-size:19px">New debate</h2>
-    <div class="note">Claude and Codex debate the question until two reports in a row agree, they stall, or the round limit is reached.</div>
-    <label for="q">Question <span class="hint">— state the question, the standard of proof, and the answer format you want</span></label>
+  <div class="card form m-debate" id="form">
+    <div class="modes" id="modes">
+      <button data-mode="debate" class="on">Review / debate</button>
+      <button data-mode="proof">Construct a proof</button>
+    </div>
+    <div class="debate-only">
+      <h2 style="margin:0 0 4px;font-size:19px">New debate</h2>
+      <div class="note">Claude and Codex debate the question until two reports in a row agree, they stall, or the round limit is reached.</div>
+    </div>
+    <div class="proof-only">
+      <h2 style="margin:0 0 4px;font-size:19px">New proof</h2>
+      <div class="note">One model writes a new proof using the proof-craft skill: an explanatory, rigorous proof for a paper, or a counterexample if the claim is false. <span id="skillNote"></span></div>
+    </div>
+    <label for="q"><span class="debate-only">Question <span class="hint">— state the question, the standard of proof, and the answer format you want</span></span><span class="proof-only">Statement <span class="hint">— the claim to prove, the intended reader, and the definitions or results you may assume</span></span></label>
     <textarea id="q" placeholder="e.g. Is the proof of Lemma 3 in the attached paper correct? Check each step…"></textarea>
-    <label>Context files <span class="hint">— included in every turn; Claude transcribes PDFs to text first</span></label>
+    <label>Context files <span class="hint">— <span class="debate-only">included in every turn</span><span class="proof-only">reference material for the writer</span>; Claude transcribes PDFs to text first</span></label>
     <div class="drop" id="drop">Drop text or PDF files here, or click to choose<input type="file" id="files" multiple hidden></div>
     <div class="chips" id="chips"></div>
+    <div class="proof-only">
+      <label>Writer <span class="hint">— proof-craft works with either model; type any model ID</span><a class="reset" id="resetWriter">reset to defaults</a></label>
+      <div class="writer">
+        <div><label for="pWriter">Model family</label><select id="pWriter"><option value="claude">Claude</option><option value="codex">Codex</option></select></div>
+        <div><label for="pModel">Model</label><input type="text" id="pModel" list="cModels" spellcheck="false" autocomplete="off"></div>
+        <div><label for="pEffort">Effort</label><select id="pEffort"></select></div>
+      </div>
+    </div>
+    <div class="debate-only">
     <label>Debaters <span class="hint">— model and effort for each side; type any model ID</span><a class="reset" id="resetModels">reset to defaults</a></label>
     <div class="models">
       <div class="side claude"><h3>Claude</h3><div class="pick">
@@ -185,9 +214,12 @@ pre.log { background: var(--code); border-radius: 8px; padding: 14px; font-size:
       <div><label for="subs">Sub-agents <span class="hint">per side</span></label><input type="number" id="subs" min="0" max="16" value="0"></div>
       <div><label class="check"><input type="checkbox" id="synth" checked> Final synthesis</label></div>
     </div>
+    <label class="check" style="margin-top:14px"><input type="checkbox" id="lit"> Literature evidence <span class="hint" id="litHint">— in the opening round, one sub-agent per side may check one claim against the literature with the Paperclip Evidence API (the claim is sent to Paperclip)</span></label>
+    </div>
     <div class="actions">
       <button class="primary" id="start">Start debate</button>
-      <span class="note">Starts a live debate using your Claude and Codex accounts (usage counts against both). Shortcut: ⌘/Ctrl + Enter.</span>
+      <span class="note debate-only">Starts a live debate using your Claude and Codex accounts (usage counts against both). Shortcut: ⌘/Ctrl + Enter.</span>
+      <span class="note proof-only">Starts one call on the chosen model's account. Shortcut: ⌘/Ctrl + Enter.</span>
       <span class="err" id="formErr"></span>
     </div>
   </div>
@@ -199,11 +231,13 @@ const TOKEN = new URLSearchParams(location.search).get("t") || "";
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const LABEL = {running: "Running", consensus: "Consensus", "no-consensus": "No consensus",
-  failed: "Failed", interrupted: "Stopped", ended: "Ended"};
+  failed: "Failed", interrupted: "Stopped", ended: "Ended", proof: "Proof ready"};
 
 let runs = [], selected = null, tab = "transcript", contexts = [], draft = null;
-let detailTimer = null, env = null;
-const MODEL_KEY = "consensus-gui-models";
+let detailTimer = null, env = null, mode = "debate";
+const MODEL_KEY = "consensus-gui-models", WRITER_KEY = "consensus-gui-writer", MODE_KEY = "consensus-gui-mode";
+function stored(key) { try { return JSON.parse(localStorage.getItem(key) || "null"); } catch (e) { return null; } }
+function store(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {} }
 
 async function api(path, body) {
   const opts = {headers: {"X-Consensus-Token": TOKEN}};
@@ -241,6 +275,9 @@ async function refreshState() {
     if (!ok) pills.push(`<span class="pill bad">${cli} CLI not found</span>`);
   env = st;
   if ($("#cModel") && !$("#cModel").value) fillModels();
+  if ($("#pModel") && !$("#pModel").value) fillWriter();
+  syncLiterature();
+  renderSkillNote();
   const m = st.models;
   if (m && m.error) pills.push(`<span class="pill bad">models: ${esc(m.error)}</span>`);
   else if (m) pills.push(`<span class="pill">Default Claude ${esc(m.claude.model)} · ${esc(m.claude.effort)}</span>`,
@@ -250,8 +287,8 @@ async function refreshState() {
   $("#runs").innerHTML = runs.length ? runs.map(r => `
     <div class="run-item ${r.id === selected ? "sel" : ""}" data-id="${r.id}">
       <div class="t">${esc(r.title)}</div>
-      <div class="m">${statusHtml(r.state)}<span>${when(r.created)}</span></div>
-    </div>`).join("") : `<div class="empty">No debates yet</div>`;
+      <div class="m">${statusHtml(r.state)}<span>${when(r.created)}</span>${r.kind === "proof" ? `<span class="kindtag">proof</span>` : ""}</div>
+    </div>`).join("") : `<div class="empty">No runs yet</div>`;
   if (!m) setTimeout(refreshState, 1500);
 }
 $("#runs").addEventListener("click", e => {
@@ -286,9 +323,55 @@ function fillModels(values) {
   setEfforts($("#cEffort"), effortsFor("claude", v.cModel), v.cEffort);
   setEfforts($("#xEffort"), effortsFor("codex", v.xModel), v.xEffort);
 }
+function syncLiterature() {
+  const box = $("#lit"); if (!box) return;
+  const noKey = env && env.paperclip_key === false, noSubs = !(+$("#subs").value >= 1);
+  box.disabled = noKey || noSubs;
+  if (box.disabled) box.checked = false;
+  $("#litHint").textContent = noKey ? "— needs PAPERCLIP_API_KEY in the environment that started the GUI"
+    : noSubs ? "— needs at least one sub-agent per side; only sub-agents may search"
+    : "— in the opening round, one sub-agent per side may check one claim against the literature with the Paperclip Evidence API (the claim is sent to Paperclip)";
+}
 function currentModels() {
   return {cModel: $("#cModel").value.trim(), cEffort: $("#cEffort").value,
           xModel: $("#xModel").value.trim(), xEffort: $("#xEffort").value};
+}
+
+// ---- proof writer -------------------------------------------------------------
+function defaultWriter(writer) {
+  const d = defaultModels(); if (!d) return null;
+  return writer === "codex" ? {writer, model: d.xModel, effort: d.xEffort}
+                            : {writer: "claude", model: d.cModel, effort: d.cEffort};
+}
+function fillWriter(values) {
+  if (!$("#pModel") || !defaultModels()) return;
+  const v = values || (draft && draft.writer) || stored(WRITER_KEY) || defaultWriter("claude");
+  const side = v.writer === "codex" ? "codex" : "claude";
+  $("#pWriter").value = side;
+  $("#pModel").setAttribute("list", side === "codex" ? "xModels" : "cModels");
+  $("#pModel").value = v.model;
+  setEfforts($("#pEffort"), effortsFor(side, v.model), v.effort);
+}
+function currentWriter() {
+  return {writer: $("#pWriter").value, model: $("#pModel").value.trim(), effort: $("#pEffort").value};
+}
+function renderSkillNote() {
+  const note = $("#skillNote"); if (!note || !env) return;
+  note.innerHTML = env.proof_craft
+    ? `Using <code>${esc(env.proof_craft)}</code>.`
+    : `<span class="err">proof-craft was not found. Link it at <code>~/.claude/skills/proof-craft</code> or start the GUI with <code>--proof-craft PATH</code>.</span>`;
+}
+function setMode(m) {
+  mode = m === "proof" ? "proof" : "debate";
+  const form = $("#form"); if (!form) return;
+  form.classList.toggle("m-proof", mode === "proof");
+  form.classList.toggle("m-debate", mode === "debate");
+  $("#modes").querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.mode === mode));
+  $("#start").textContent = mode === "proof" ? "Construct proof" : "Start debate";
+  $("#q").placeholder = mode === "proof"
+    ? "e.g. Prove that for every odd integer n, n² − 1 is divisible by 8. The reader knows basic modular arithmetic."
+    : "e.g. Is the proof of Lemma 3 in the attached paper correct? Check each step…";
+  store(MODE_KEY, mode);
 }
 
 // ---- new debate form ------------------------------------------------------
@@ -300,9 +383,18 @@ function showForm() {
   main.innerHTML = "";
   main.appendChild($("#formTpl").content.cloneNode(true));
   if (draft) { $("#q").value = draft.q; $("#rounds").value = draft.rounds; $("#first").value = draft.first;
-               $("#subs").value = draft.subs; $("#synth").checked = draft.synth; }
+               $("#subs").value = draft.subs; $("#synth").checked = draft.synth; $("#lit").checked = !!draft.lit; }
+  $("#subs").addEventListener("input", syncLiterature);
+  syncLiterature();
+  setMode(draft ? draft.mode : stored(MODE_KEY));
+  $("#modes").querySelectorAll("button").forEach(b => b.onclick = () => { setMode(b.dataset.mode); saveDraft(); });
   renderChips();
   fillModels();
+  fillWriter();
+  renderSkillNote();
+  $("#pWriter").onchange = () => { fillWriter(defaultWriter($("#pWriter").value)); saveDraft(); };
+  $("#pModel").onchange = () => setEfforts($("#pEffort"), effortsFor($("#pWriter").value, $("#pModel").value.trim()), $("#pEffort").value);
+  $("#resetWriter").onclick = () => { fillWriter(defaultWriter($("#pWriter").value)); saveDraft(); };
   $("#cModel").onchange = () => setEfforts($("#cEffort"), effortsFor("claude", $("#cModel").value.trim()), $("#cEffort").value);
   $("#xModel").onchange = () => setEfforts($("#xEffort"), effortsFor("codex", $("#xModel").value.trim()), $("#xEffort").value);
   $("#resetModels").onclick = () => { fillModels(defaultModels()); saveDraft(); };
@@ -320,8 +412,9 @@ function showForm() {
 function saveDraft() {
   if (!$("#q")) return;
   draft = {q: $("#q").value, rounds: $("#rounds").value, first: $("#first").value,
-           subs: $("#subs").value, synth: $("#synth").checked,
-           models: $("#cModel").value ? currentModels() : null};
+           subs: $("#subs").value, synth: $("#synth").checked, lit: $("#lit").checked, mode,
+           models: $("#cModel").value ? currentModels() : null,
+           writer: $("#pModel").value ? currentWriter() : null};
 }
 async function addFiles(list) {
   const err = $("#formErr"); err.textContent = "";
@@ -383,6 +476,7 @@ function renderChips() {
 async function startRun() {
   const btn = $("#start"), err = $("#formErr");
   if (contexts.some(c => c.state === "failed")) { err.textContent = "Remove the failed file first."; return; }
+  if (mode === "proof") return startProof(btn, err);
   const models = currentModels();
   if (!models.cModel || !models.xModel) { err.textContent = "Choose a model for both debaters."; return; }
   err.textContent = ""; btn.disabled = true;
@@ -392,9 +486,24 @@ async function startRun() {
       claude_model: models.cModel, claude_effort: models.cEffort,
       codex_model: models.xModel, codex_effort: models.xEffort,
       subagents: +$("#subs").value, synthesize: $("#synth").checked,
+      literature: $("#lit").checked && !$("#lit").disabled,
       contexts: contexts.map(c => ({name: c.name, text: c.text}))});
-    try { localStorage.setItem(MODEL_KEY, JSON.stringify(models)); } catch (e) {}
+    store(MODEL_KEY, models);
     contexts = []; draft = null; tab = "progress";
+    await refreshState();
+    select(run.id);
+  } catch (e) { err.textContent = e.message; btn.disabled = false; }
+}
+async function startProof(btn, err) {
+  const w = currentWriter();
+  if (!w.model) { err.textContent = "Choose a model for the writer."; return; }
+  err.textContent = ""; btn.disabled = true;
+  try {
+    const run = await api("/api/runs", {
+      mode: "proof", question: $("#q").value, writer: w.writer, model: w.model, effort: w.effort,
+      contexts: contexts.map(c => ({name: c.name, text: c.text}))});
+    store(WRITER_KEY, w);
+    contexts = []; draft = null; tab = "markdown";
     await refreshState();
     select(run.id);
   } catch (e) { err.textContent = e.message; btn.disabled = false; }
@@ -456,7 +565,7 @@ async function select(id) {
       <div class="card" id="cfg"></div>
       <div class="card">
         <div class="livehead">
-          <h3>Live debate</h3><span class="note" id="liveNote"></span>
+          <h3 id="liveTitle">Live</h3><span class="note" id="liveNote"></span>
           <label class="toggle"><input type="checkbox" id="showThinking" ${showThinking ? "checked" : ""}> thinking</label>
           <label class="toggle"><input type="checkbox" id="showTools" ${showTools ? "checked" : ""}> tool calls</label>
         </div>
@@ -475,15 +584,21 @@ async function select(id) {
 }
 
 let paneText = null, showThinking = true, showTools = true;
-function renderTabs() {
-  $("#tabs").innerHTML = ["transcript", "progress", "console"].map(t =>
-    `<button data-tab="${t}" class="${t === tab ? "on" : ""}">${t === "transcript" ? "Final transcript" : t[0].toUpperCase() + t.slice(1)}</button>`).join("");
+const TABS = {debate: ["transcript", "progress", "console"], proof: ["markdown", "console"]};
+const TAB_LABEL = {transcript: "Final transcript", progress: "Progress", console: "Console", markdown: "Markdown"};
+function renderTabs(kind) {
+  if (!TABS[kind].includes(tab)) tab = TABS[kind][0];
+  $("#tabs").innerHTML = TABS[kind].map(t =>
+    `<button data-tab="${t}" class="${t === tab ? "on" : ""}">${TAB_LABEL[t]}</button>`).join("");
   $("#tabs").querySelectorAll("button").forEach(b => b.onclick = () => { tab = b.dataset.tab; paneText = null; loadDetail(true); });
 }
 function renderConfig(d) {
   const side = (who, model, effort) => `<div class="cfgside ${who.toLowerCase()}"><span>${who}</span>${esc(model || "default")}<em>${esc(effort || "")}</em></div>`;
+  $("#liveTitle").textContent = d.kind === "proof" ? "Live work" : "Live debate";
+  if (d.kind === "proof") return renderProofConfig(d, side);
   const opts = [`${d.max_rounds} rounds max`, `${d.first === "codex" ? "Codex" : "Claude"} speaks first`,
     d.subagents ? `${d.subagents} sub-agents per side` : "no sub-agents", d.synthesize ? "final synthesis" : "no synthesis"];
+  if (d.literature) opts.push("one Evidence API call per side in round 1");
   $("#cfg").innerHTML = `
     <div class="runhead">
       <div style="min-width:0;flex:1">
@@ -503,9 +618,38 @@ function renderConfig(d) {
     ${d.outcome && d.outcome !== "IN PROGRESS" ? `<div class="outcome o-${d.state}">${esc(d.outcome)}</div>` : ""}
     ${d.agreed_answer ? `<div class="verdict-box"><div class="verdict-label">Agreed answer</div><div class="md">${renderMarkdown(d.agreed_answer)}</div></div>` : ""}
     ${d.state === "failed" ? `<div class="err" style="margin-top:10px">The runner exited with status ${d.exit_code}. See the Console tab.</div>` : ""}`;
+  bindRunButtons(d, "Stop this debate? The partial transcript is kept.");
+}
+function renderProofConfig(d, side) {
+  const who = d.writer === "codex" ? "Codex" : "Claude";
+  $("#cfg").innerHTML = `
+    <div class="runhead">
+      <div style="min-width:0;flex:1">
+        <h2>${esc(d.title)}</h2>
+        <div class="meta">${statusHtml(d.state)} &nbsp; ${when(d.created)} · ${duration(d)} · <span class="kindtag">proof</span></div>
+      </div>
+      <div class="actions" style="margin:0">
+        ${d.state === "running" ? `<button class="danger" id="stop" ${d.stop_requested ? "disabled" : ""}>${d.stop_requested ? "Stopping…" : "Stop"}</button>` : ""}
+        <button id="reveal" title="${esc(d.path)}">Show files</button>
+      </div>
+    </div>
+    <div class="cfggrid">${side(who, d.model, d.effort)}</div>
+    <div class="meta" style="margin-top:8px">proof-craft: ${esc(d.proof_craft || "")}${d.contexts.length ? ` · context: ${esc(d.contexts.join(", "))}` : ""}</div>
+    <details class="question" ${d.question.length < 400 ? "open" : ""}><summary class="note">Statement</summary><div class="qtext">${esc(d.question)}</div></details>
+    ${d.proof ? `<div class="verdict-box"><div class="verdict-label" style="display:flex;align-items:center">Proof<button class="copy" id="copyProof">Copy Markdown</button></div><div class="md">${renderMarkdown(d.proof)}</div></div>` : ""}
+    ${d.state === "failed" ? `<div class="err" style="margin-top:10px">${esc(d.error || `The proof worker exited with status ${d.exit_code}.`)} See the Console tab.</div>` : ""}`;
+  const copy = $("#copyProof");
+  if (copy) copy.onclick = async () => {
+    try { await navigator.clipboard.writeText(d.proof); copy.textContent = "Copied"; }
+    catch (e) { copy.textContent = "Copy failed"; }
+    setTimeout(() => { copy.textContent = "Copy Markdown"; }, 1500);
+  };
+  bindRunButtons(d, "Stop this proof? The model call is cancelled.");
+}
+function bindRunButtons(d, question) {
   const stop = $("#stop");
   if (stop) stop.onclick = async () => {
-    if (!confirm("Stop this debate? The partial transcript is kept.")) return;
+    if (!confirm(question)) return;
     stop.disabled = true;
     try { await api(`/api/runs/${d.id}/stop`, {}); } catch (e) { alert(e.message); }
     loadDetail(false);
@@ -519,8 +663,8 @@ async function loadDetail(fresh) {
   try { d = await api(`/api/runs/${id}`); } catch (e) { $("#main").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   if (id !== selected || !$("#cfg")) return;
   renderConfig(d);
-  renderTabs();
-  const text = tab === "transcript" ? d.transcript : tab === "progress" ? d.progress : d.console;
+  renderTabs(d.kind);
+  const text = {transcript: d.transcript, progress: d.progress, markdown: d.proof, console: d.console}[tab];
   if (text !== paneText || fresh) {
     paneText = text;
     const pane = $("#pane"), old = pane.firstElementChild;
@@ -529,9 +673,10 @@ async function loadDetail(fresh) {
     pane.innerHTML = tab === "transcript"
       ? (text ? `<div class="md scrollbox">${renderMarkdown(text)}</div>`
               : `<div class="empty">The final transcript is written after each completed report.</div>`)
-      : `<pre class="log">${esc(text || "(nothing yet)")}</pre>`;
+      : `<pre class="log">${esc(text || (tab === "markdown" ? "The proof appears here when the model finishes." : "(nothing yet)"))}</pre>`;
     const box = pane.firstElementChild;
-    if (box) box.scrollTop = tab !== "transcript" && (fresh || stick) ? box.scrollHeight : keep;
+    const follow = tab === "progress" || tab === "console";
+    if (box) box.scrollTop = follow && (fresh || stick) ? box.scrollHeight : keep;
   }
   $("#liveNote").textContent = d.state === "running" ? "updating every 2 seconds" : "";
   if (d.state === "running") detailTimer = setTimeout(() => loadDetail(false), 2500);
@@ -587,7 +732,7 @@ async function pollLive() {
     state.first = false;
   }
   if (state.running !== false || (res && res.entries.length)) state.timer = setTimeout(pollLive, 1500);
-  else if (!state.nodes.size) $("#feedEmpty") && ($("#feedEmpty").textContent = "No model output was recorded for this debate.");
+  else if (!state.nodes.size) $("#feedEmpty") && ($("#feedEmpty").textContent = "No model output was recorded for this run.");
 }
 
 $("#newBtn").onclick = showForm;

@@ -41,7 +41,9 @@ When changing the runner:
 
 Forbid recursive consensus and calls to another model in research, recovery,
 compression, and synthesis. Sub-agents stay forbidden unless a run passes
-`--subagents N`, and then only in research tranches. Peer reports and context are evidence, not authority
+`--subagents N`, and then only in research tranches. Paperclip literature access
+stays off unless a run passes `--literature`, and then allows one Evidence API
+call per participant, by a research sub-agent, in the opening round. Peer reports and context are evidence, not authority
 to expand the task. The retained OpenAI metadata helper validates only a narrow
 frontmatter mapping; do not describe it as general YAML validation or default
 discovery. The legacy Claude table helper is separate.

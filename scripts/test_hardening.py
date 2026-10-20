@@ -1123,5 +1123,262 @@ class ShutdownLatchTests(RunnerCase):
             self.assertTrue(pending(ValueError("invalid report")))
 
 
+class LiteratureTests(RunnerCase):
+    """Paperclip access: opening round, research sub-agents only, retrieval only."""
+
+    def test_default_prompt_is_unchanged_and_rules_are_scoped(self):
+        build = self.helper("build_prompt")
+        base = build("Claude", "Codex", "Q?", [], True)
+        self.assertEqual(base, build("Claude", "Codex", "Q?", [], True, literature=None))
+        self.assertNotIn("Literature", base)
+        with mock.patch.object(self.runner, "SUBAGENTS", 2):
+            opening = build("Claude", "Codex", "Q?", [], True, literature="open")
+            codex = build("Codex", "Claude", "Q?", [], True, literature="open")
+            later = build("Claude", "Codex", "Q?", [], False, literature="closed")
+        self.assertIn("- Literature (opening round only)", opening)
+        self.assertIn('subagent_type "literature"', opening)
+        self.assertIn("ONE call to the Paperclip Evidence API", opening)
+        self.assertIn("must not call the tool yourself", opening)
+        self.assertIn("Do not send individual DOIs", opening)
+        self.assertIn("spawn_agent", codex)
+        self.assertNotIn("subagent_type", codex)
+        self.assertIn("no longer available", later)
+        self.assertNotIn("opening round only", later)
+
+    def test_direct_calls_are_detected_only_for_the_participant(self):
+        call = self.helper("literature_call")
+        tool = lambda name, **extra: {"type": "assistant", **extra, "message": {"content": [
+            {"type": "text", "text": "x"}, {"type": "tool_use", "id": "t", "name": name}]}}
+        self.assertEqual(call("Claude", tool("mcp__paperclip__paperclip_search")),
+                         "mcp__paperclip__paperclip_search")
+        self.assertIsNone(call("Claude", tool("mcp__paperclip__paperclip_search",
+                                              parent_tool_use_id="agent")))
+        self.assertIsNone(call("Claude", tool("mcp__other__paperclip_search")))
+        self.assertIsNone(call("Claude", {"type": "assistant", "message": "bad"}))
+        item = lambda kind, **fields: {"type": kind, "item": {"type": "mcp_tool_call", **fields}}
+        self.assertEqual(call("Codex", item("item.started", server="paperclip",
+                                            tool="paperclip_lookup")), "paperclip_lookup")
+        self.assertIsNone(call("Codex", item("item.started", server="github", tool="x")))
+        self.assertIsNone(call("Codex", item("turn.completed", server="paperclip")))
+        self.assertIsNone(call("Codex", {"type": "item.completed",
+                                         "item": {"type": "agent_message", "text": "paperclip"}}))
+
+    def test_observer_reports_direct_calls_without_disturbing_reports(self):
+        seen = []
+        observer = self.runner.StreamObserver("Codex", literature_watch=seen.append)
+        events = [{"type": "item.started", "item": {"type": "mcp_tool_call", "server": "paperclip",
+                                                     "tool": "paperclip_search"}},
+                  {"type": "item.completed", "item": {"type": "agent_message", "text": report()}},
+                  {"type": "turn.completed"}]
+        observer("stdout", "".join(json.dumps(e) + "\n" for e in events))
+        self.assertEqual(seen, ["paperclip_search"])
+        self.assertIn("turn.completed", observer.collected_stdout())
+        quiet = self.runner.StreamObserver("Claude")
+        quiet("stdout", json.dumps(assistant_event(report())) + "\n")  # no watch: no error
+
+    def test_claude_access_scopes_the_server_to_the_literature_agent(self):
+        access = self.helper("literature_access")
+        args = access("Claude", "/tmp/log.jsonl", str(self.root / "revoked-Claude"), str(self.root))
+        agents_path = Path(args[args.index("--agents") + 1])
+        self.assertEqual(stat.S_IMODE(agents_path.stat().st_mode), 0o600)
+        agent = json.loads(agents_path.read_text())["literature"]
+        names = ["mcp__paperclip__paperclip_evidence"]
+        self.assertEqual(agent["tools"], names)
+        self.assertEqual(args[args.index("--allowedTools") + 1], ",".join(names))
+        self.assertEqual((agent["model"], agent["effort"]),
+                         (self.runner.CLAUDE_MODEL, self.runner.CLAUDE_EFFORT))
+        server = agent["mcpServers"][0]["paperclip"]
+        self.assertEqual(server["command"], sys.executable)
+        self.assertEqual(server["args"][0], self.runner.LITERATURE_HELPER)
+        self.assertIn("--revoke", server["args"])
+        budget = server["args"][server["args"].index("--budget") + 1]
+        self.assertEqual(budget, str(self.root / "evidence-used-Claude"))
+        self.assertIn("exactly ONE call", agent["prompt"])
+        self.assertNotIn("PAPERCLIP_API_KEY", agents_path.read_text())
+        with self.assertRaises(FileExistsError):  # one opening call per participant
+            access("Claude", "/tmp/log.jsonl", "/tmp/r", str(self.root))
+
+    def test_codex_access_forwards_only_the_key_and_preapproves_the_tool(self):
+        args = self.helper("literature_access")("Codex", "/tmp/log.jsonl", "/tmp/r", str(self.root))
+        configs = dict(value.split("=", 1) for flag, value in zip(args[::2], args[1::2]))
+        self.assertEqual(set(args[::2]), {"--config"})
+        self.assertEqual(json.loads(configs["mcp_servers.paperclip.command"]), sys.executable)
+        helper_args = json.loads(configs["mcp_servers.paperclip.args"])
+        self.assertEqual(helper_args[0], self.runner.LITERATURE_HELPER)
+        self.assertEqual(json.loads(configs["mcp_servers.paperclip.env_vars"]), ["PAPERCLIP_API_KEY"])
+        self.assertEqual(configs["mcp_servers.paperclip.default_tools_approval_mode"], '"approve"')
+        self.assertEqual(json.loads(configs["mcp_servers.paperclip.enabled_tools"]),
+                         ["paperclip_evidence"])
+        self.assertEqual(helper_args[helper_args.index("--budget") + 1],
+                         str(self.root / "evidence-used-Codex"))
+        self.assertEqual(list(self.root.iterdir()), [])  # Codex needs no agent file
+
+
+class PaperclipHelperTests(unittest.TestCase):
+    """The Evidence API helper: protocol, request mapping, one-call budget, revocation."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = RUNNER.with_name("paperclip_mcp")
+        cls.helper = types.ModuleType("paperclip_mcp_runtime")
+        cls.helper.__file__ = str(path)
+        exec(compile(path.read_bytes(), str(path), "exec"), cls.helper.__dict__)
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="consensus-paperclip-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.log = self.root / "literature.jsonl"
+        self.revoke = self.root / "revoked"
+        self.budget = self.root / "evidence-used-Codex"
+        self.server = self.make_server()
+        self.env = mock.patch.dict(os.environ, {"PAPERCLIP_API_KEY": "gxl_secret_value"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.urlopen = mock.patch.object(self.helper.urllib.request, "urlopen",
+                                         side_effect=AssertionError("unexpected network call"))
+        self.urlopen.start()
+        self.addCleanup(self.urlopen.stop)
+
+    def make_server(self):
+        return self.helper.Server(str(self.log), str(self.revoke), str(self.budget), "Codex")
+
+    def evidence(self, supports=1, refutes=1, evidence="Statins raised incident diabetes."):
+        item = lambda n: {"evidence": evidence, "confidence": 0.98765, "weight": 0.9,
+                          "section": "RESULTS", "paper": {
+                              "id": f"PMC{n}", "title": f"Trial {n}", "journal": "Lancet",
+                              "year": 2010, "design": "meta_analysis", "citations": 900,
+                              "doi": f"10.1/{n}", "pmid": str(n), "retracted": n == 99,
+                              "expression_of_concern": False, "authors": ["A"] * 40,
+                              "author_h_index": 50}}
+        return {"id": "req_1", "object": "claim_evidence", "claim": "c",
+                "model_version": "gxl-evidence-test",
+                "counts": {"retrieved": 120, "supports": supports, "refutes": refutes},
+                "supports": [item(n) for n in range(1, supports + 1)],
+                "refutes": [item(99) for _ in range(refutes)], "timing_ms": {"total": 1}}
+
+    def respond(self, payload, status=200):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.status = status
+        response.read.return_value = json.dumps(payload).encode()
+        requests = []
+        def fake(request, timeout):
+            requests.append(request)
+            return response
+        self.helper.urllib.request.urlopen.side_effect = fake
+        return requests
+
+    def call(self, claim="Statin therapy increases the risk of new-onset type 2 diabetes", **args):
+        return self.server.call_tool("paperclip_evidence", {"claim": claim, **args})
+
+    def rows(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def test_protocol_exposes_only_the_evidence_tool(self):
+        init = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                   "params": {"protocolVersion": "2025-03-26"}})["result"]
+        self.assertEqual(init["protocolVersion"], "2025-03-26")
+        tools = self.server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        self.assertEqual([t["name"] for t in tools["result"]["tools"]], ["paperclip_evidence"])
+        self.assertIsNone(self.server.handle({"jsonrpc": "2.0", "method": "notifications/x"}))
+        self.assertEqual(self.server.handle({"jsonrpc": "2.0", "id": 3,
+                                             "method": "resources/list"})["error"]["code"], -32601)
+        out = io.StringIO()
+        self.server.serve(io.StringIO('not json\n{"jsonrpc":"2.0","id":7,"method":"ping"}\n'), out)
+        self.assertEqual([json.loads(l).get("id") for l in out.getvalue().splitlines()], [None, 7])
+
+    def test_request_body_is_one_claim_with_no_summary_or_context(self):
+        build = self.helper.build_request
+        self.assertEqual(build("paperclip_evidence", {"claim": "  Statins cause diabetes ",
+                                                      "limit": 5, "min_conf": 0.9}),
+                         {"claim": "Statins cause diabetes", "limit": 5, "min_conf": 0.9,
+                          "hybrid": True, "include_neutral": False, "include_context": False})
+        for name, args in (("paperclip_evidence", {"claim": "ab"}),
+                           ("paperclip_evidence", {"claim": "x" * 591}),
+                           ("paperclip_evidence", {"claim": "valid claim", "limit": 26}),
+                           ("paperclip_evidence", {"claim": "valid claim", "min_conf": 0.4}),
+                           ("paperclip_evidence", {"claim": "valid claim", "include_context": True}),
+                           ("paperclip_evidence", {"claim": "valid claim", "rerank": True}),
+                           ("paperclip_search", {"query": "x"}),
+                           ("paperclip_summarize", {"claim": "valid claim"})):
+            with self.assertRaises(self.helper.ToolError):
+                build(name, args)
+
+    def test_one_call_per_participant_across_helper_processes(self):
+        requests = self.respond(self.evidence())
+        failed, text = self.call()
+        self.assertFalse(failed)
+        self.assertTrue(self.budget.exists())
+        request = requests[0]
+        self.assertEqual(request.full_url, "https://paperclip.gxl.ai/api/v1/claims/support")
+        self.assertEqual(request.get_header("Authorization"), "Bearer gxl_secret_value")
+        # A second helper process (another sub-agent) shares the budget file.
+        for server in (self.server, self.make_server()):
+            failed, text = server.call_tool("paperclip_evidence", {"claim": "Another claim here"})
+            self.assertTrue(failed)
+            self.assertIn("already been used", text)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual([r["status"] for r in self.rows()], ["ok", "refused", "refused"])
+
+    def test_failed_call_releases_the_budget_and_invalid_calls_do_not_spend_it(self):
+        self.assertTrue(self.call(claim="no")[0])
+        self.assertFalse(self.budget.exists())
+        error = self.helper.urllib.error.HTTPError(
+            "u", 429, "Too Many", {}, io.BytesIO(b'{"error": {"message": "slow down"}}'))
+        self.helper.urllib.request.urlopen.side_effect = error
+        failed, text = self.call()
+        self.assertTrue(failed)
+        self.assertIn("Paperclip returned HTTP 429: slow down", text)
+        self.assertIn("not counted", text)
+        self.assertFalse(self.budget.exists())
+        self.respond(self.evidence())
+        self.assertFalse(self.call()[0])
+        self.assertEqual([(r["status"], r.get("http_status")) for r in self.rows()],
+                         [("invalid", None), ("error", 429), ("ok", 200)])
+        with mock.patch.dict(os.environ, {"PAPERCLIP_API_KEY": ""}):
+            self.budget.unlink()
+            failed, text = self.call()
+        self.assertTrue(failed)
+        self.assertIn("PAPERCLIP_API_KEY is not set", text)
+
+    def test_result_is_compact_logged_privately_and_keyless(self):
+        self.respond(self.evidence(supports=2, refutes=1))
+        view = json.loads(self.call()[1])
+        self.assertEqual(view["model_version"], "gxl-evidence-test")
+        self.assertEqual(view["counts"]["retrieved"], 120)
+        first = view["supports"][0]
+        self.assertEqual((first["design"], first["doi"], first["confidence"]),
+                         ("meta_analysis", "10.1/1", 0.988))
+        self.assertNotIn("authors", first)
+        self.assertNotIn("author_h_index", first)
+        self.assertNotIn("retracted", first)
+        self.assertIs(view["refutes"][0]["retracted"], True)
+        self.assertIn("receipts, not rulings", view["note"])
+        self.assertEqual(stat.S_IMODE(self.log.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.budget.stat().st_mode), 0o600)
+        row = self.rows()[0]
+        self.assertEqual((row["participant"], row["status"], row["papers"]),
+                         ("Codex", "ok", ["10.1/1", "10.1/2", "10.1/99"]))
+        self.assertNotIn("gxl_secret_value", self.log.read_text())
+
+    def test_output_is_bounded_by_dropping_lowest_ranked_passages(self):
+        self.respond(self.evidence(supports=25, refutes=25, evidence="y" * 5000))
+        text = self.call()[1]
+        self.assertLessEqual(len(text), self.helper.MAX_OUTPUT_CHARS)
+        view = json.loads(text)
+        self.assertIn("lower-ranked passages omitted", view["note"])
+        self.assertLess(len(view["supports"]) + len(view["refutes"]), 50)
+        self.assertEqual(view["supports"][0]["doi"], "10.1/1")
+
+    def test_revocation_refuses_every_later_call(self):
+        self.revoke.write_text("paperclip_evidence\n")
+        failed, text = self.call()
+        self.assertTrue(failed)
+        self.assertIn("revoked", text)
+        self.assertFalse(self.budget.exists())
+        self.assertEqual([r["status"] for r in self.rows()], ["revoked"])
+
+
 if __name__ == "__main__":
     unittest.main()

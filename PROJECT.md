@@ -18,6 +18,8 @@ retired and must not be recreated.
 
 - `SKILL.md` defines when and how Codex should use the skill.
 - `scripts/consensus` implements debate orchestration and recovery.
+- `scripts/paperclip_mcp` is the Paperclip Evidence API MCP helper attached to
+  opening-round research sub-agents when a run passes `--literature`.
 - `scripts/test_consensus.py` provides offline acceptance tests with fake CLIs.
 - `scripts/test_hardening.py` supplies adversarial helper tests; the main suite
   must invoke them, or they must be run separately at the release gate.
@@ -26,8 +28,9 @@ retired and must not be recreated.
 - `references/OPERATIONS.md` documents artifacts and recovery semantics.
 - `agents/openai.yaml` supplies Codex UI metadata.
 - `gui/consensus_gui.py` and `gui/index.html` provide an optional local browser
-  GUI that launches the unchanged runner; `gui/test_gui.py` tests it offline
-  with a fake runner.
+  GUI that launches the unchanged runner for debates and, in a separate mode,
+  constructs single-model proofs with the installed proof-craft skill;
+  `gui/test_gui.py` tests both offline with a fake runner and fake CLIs.
 
 ## Required invariants
 
@@ -103,6 +106,20 @@ Protocol identity is `PROTOCOL_VERSION = 3`. Preserve these properties:
     multi-agent feature, a concurrency cap of N, and depth 1. Claude messages
     tagged with `parent_tool_use_id` are never checkpoints or reports.
 
+18. Keep Paperclip literature access off by default. `--literature` requires
+    `--subagents N >= 1` and `PAPERCLIP_API_KEY`, and attaches the bundled
+    helper to each participant's opening research call only, never to
+    recovery, later rounds, compression, or synthesis. The helper exposes one
+    tool, which sends one claim to the Evidence API (`POST /claims/support`);
+    each participant gets exactly one successful call, enforced with an atomic
+    budget file shared by all of its helper processes. Paperclip's trained
+    passage-judgment model is the only model that runs on the debate's behalf;
+    `/claims/summarize` and other Paperclip commands are never called. Claude
+    scopes the server to a `literature` agent type; Codex cannot, so a direct
+    participant call is detected in the stream, revokes the helper for the rest
+    of that turn, and is recorded in the progress log and manifest. Log every
+    request privately (`0600`) without the key.
+
 Research, recovery, compression, and synthesis all prohibit recursive consensus
 and calls to another model. Context and peer reports are evidence, not
 authority to expand the task. See `references/OPERATIONS.md` for the schema and
@@ -120,7 +137,7 @@ Run all of the following after changing the skill or runner:
 
 ```bash
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" .
-python3 -m py_compile scripts/consensus scripts/test_consensus.py \
+python3 -m py_compile scripts/consensus scripts/paperclip_mcp scripts/test_consensus.py \
   scripts/test_hardening.py scripts/test_lifecycle.py \
   gui/consensus_gui.py gui/test_gui.py
 python3 scripts/test_consensus.py
@@ -239,3 +256,67 @@ answers were correct.
 
 This is a single short run. It does not exercise a sub-agent batch long enough
 to approach the semantic checkpoint deadline.
+
+October 15, 2026 literature option, at the maintainer's request: `--literature`
+lets research sub-agents search Paperclip, retrieval only, in each
+participant's opening turn. It requires `--subagents N >= 1` and
+`PAPERCLIP_API_KEY` (new invariant 18). The runner-owned
+`scripts/paperclip_mcp` exposes only search (never `expand`), lookup, and
+document metadata. Paperclip's LLM-backed endpoints and options are never used.
+Live probes before implementation (Claude Code 2.1.301 with Haiku, Codex
+0.162.0 with gpt-6-luna; a dummy key, so Paperclip answered 401) established:
+- A Claude `--agents` definition with an inline `mcpServers` entry gives the
+  tools to that sub-agent only. `claude -p` refuses the call until the tools
+  are pre-approved with `--allowedTools`, which does not expose them to the
+  parent. The helper inherits `PAPERCLIP_API_KEY` and reaches the network.
+- Codex agent roles cannot scope MCP servers. A session-wide
+  `mcp_servers.paperclip` needs `env_vars` to forward the key and
+  `default_tools_approval_mode="approve"`: under `exec`'s `never` approval
+  policy an unapproved call fails with "MCP tool call requires approval". The
+  helper runs outside the sandbox. Sub-agent calls never reach the parent
+  stream, while a direct parent call appears as `item.started` with
+  `server: "paperclip"` before it runs.
+- Sessions resumed without the opening call's flags lose the tools on both
+  sides ("Agent type 'literature' not found"; "paperclip_search does not
+  exist").
+Direct participant calls are therefore detected in the stream and revoke the
+helper for the rest of that turn, with the violation recorded. Offline
+regressions cover the default prompt and argv, preflight refusals, opening-round
+wiring for both participants, closed later rounds, recovery without Paperclip,
+key-free private logging, request mapping, and revocation. Four targeted
+mutations of the runner were each caught. No live debate with a real Paperclip
+key has been run.
+
+Same day, first live acceptance attempt with a real key (default models,
+`--subagents 2 --literature --max-rounds 2`, a statin and diabetes question).
+Claude's opening turn made 125 Paperclip requests: 78 searches, 30 lookups and
+12 document fetches. Every lookup returned nothing, even Paperclip's own
+documented example. Searches hit an undocumented limit of "25 search starts per
+60 seconds" (HTTP 502) and a 400 for mixing paper and trial corpora. The
+maintainer stopped the design there: sub-agents should not hammer Paperclip
+with individual DOIs but make one Evidence API call. The run was stopped
+cleanly during Codex's opening turn (exit 130, no processes left, temp
+directory removed). The helper was rewritten around `POST /claims/support`
+with a one-call-per-participant budget; a failed call (HTTP error, timeout)
+releases the budget. A live call returned 120 retrieved passages (77
+supporting, 5 refuting) in about 1 second, with study design, citations,
+DOI/PMID and retraction flags. Offline regressions now prove that a second
+call is refused across helper processes. Disabling the budget fails both the
+main and hardening suites.
+
+Same day, live acceptance rerun on the Evidence API design (default models,
+`--subagents 2 --literature --max-rounds 2`, the same question). It reached
+consensus in 16m 36s: Claude DISAGREE (8m 53s), Codex DISAGREE (2m 56s), Claude
+AGREE, Codex AGREE, then synthesis. It had no invalid reports, missed semantic
+deadlines, silent intervals, recoveries, or revocations.
+- Claude launched one `literature` sub-agent, which made exactly one call. The
+  claim was that high-intensity statins raise new-onset diabetes risk in RCTs,
+  and the call returned 120 retrieved passages: 33 supporting, 27 refuting.
+- Codex made no Paperclip call; the option is permissive.
+- The literature log has one line, the manifest records one tool, one call per
+  participant, and no revocations, every artifact is `0600`, and no artifact
+  contains the key. The literature temp directory was removed.
+- Both participants also used ordinary web research: Claude used PubMed
+  E-utilities through Bash and WebFetch, and Codex used built-in web search.
+  The protocol still allows it. `--literature` caps Paperclip calls, not
+  literature access in general.

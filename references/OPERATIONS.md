@@ -15,7 +15,11 @@ For `--save debate.md --progress debate.progress.md`, the runner maintains:
 - `debate.progress.md.codex-stream.jsonl`: private fsynced raw Codex stream
   journal;
 - `debate.progress.md.protocol.json`: runner identity, protocol version, and
-  enforced deadlines.
+  enforced deadlines;
+- `debate.progress.md.literature.jsonl` (only with `--literature`): private log
+  of every Paperclip Evidence API request: participant, claim, status, HTTP
+  status, counts, model version, and the cited papers' DOIs or PMIDs. It never
+  contains the API key.
 
 Reserve the entire artifact namespace before mutation or provider calls. Paths
 must be disjoint after canonicalization and same-inode checks; transcript,
@@ -185,6 +189,60 @@ Recovery, compression, and synthesis never receive them. The manifest records
   sub-agent batch and for tasks expected to finish within 10 minutes. A
   participant blocked on a sub-agent cannot emit its own checkpoint.
 
+### Literature search (Paperclip Evidence API)
+
+`--literature` is off by default and requires `--subagents N` with N >= 1 and a
+`PAPERCLIP_API_KEY`; the runner refuses to start otherwise. In each
+participant's opening research call (round 1), one research sub-agent may send
+one claim to the [Paperclip Evidence API](https://paperclip.gxl.ai/evidence).
+Recovery, later rounds, compression, and synthesis never receive it, and
+later-round prompts say the window has closed. Resumed sessions lose the tool
+because the access is passed only on the opening call's command line.
+
+The bundled `scripts/paperclip_mcp` is a stdio MCP server owned by the runner.
+It exposes exactly one tool, `paperclip_evidence`. The tool sends one claim
+(3-590 characters, a statement rather than a question) to
+`POST /claims/support` with `hybrid` on and `include_context`/`include_neutral`
+off. Paperclip searches its full-text passages, and its trained judgment model
+marks the sentences that support or refute the claim. The response is ranked
+by confidence, study design, and citations, with DOI/PMID and retraction flags.
+That classifier is the only model that runs on the debate's behalf.
+`/claims/summarize`, which generates prose, and the other Paperclip commands
+are never called. Responses are compacted (no author lists, evidence clipped
+to 1,500 characters) and capped at 60,000 characters by dropping the
+lowest-ranked passages. The key comes only from the environment and is sent as
+a Bearer token.
+
+- One call per participant: before sending, the helper atomically creates the
+  participant's budget file in the runner's private scratch directory. A
+  second call is refused, even from another helper process; Claude starts one
+  per sub-agent. A call that returns no result (HTTP error, timeout) removes
+  the file so it can be retried. Invalid arguments never spend it.
+- Claude: the runner passes `--agents` with a `literature` agent type whose
+  inline MCP server only that sub-agent sees, and `--allowedTools` for the
+  tool (pre-approval, not availability). The parent conversation does not
+  have it.
+- Codex: custom agents cannot scope MCP servers, so the runner adds a
+  session-wide `mcp_servers.paperclip` with `env_vars=["PAPERCLIP_API_KEY"]`,
+  `default_tools_approval_mode="approve"`, and `enabled_tools` limited to the
+  tool. The participant could therefore call it itself.
+- Direct calls: a participant's own call appears in its stream (Claude: a
+  top-level `tool_use` named `mcp__paperclip__*`; Codex: an `mcp_tool_call`
+  item with `server: "paperclip"`), while sub-agent calls do not. The runner
+  then creates a revoke flag, the helper refuses every later request in that
+  turn, and the progress log and manifest
+  (`literature.direct_call_revocations`) record the violation. The offending
+  request may already have returned results; the debate continues.
+- The progress log summarizes each participant's opening-round requests by
+  status: ok, error, refused as over budget, refused after revocation, invalid.
+
+The claim leaves the machine and may reflect private context; the prompt asks
+participants to keep private material out of it. Live probes on October 15,
+2026 (Claude Code 2.1.301, Codex 0.162.0) established the transport facts
+above. An earlier design gave sub-agents search, lookup, and document tools; in
+the first live run one participant made 125 requests and hit undocumented
+rate limits. The maintainer replaced it with the single Evidence API call.
+
 ## Consensus and synthesis
 
 Consensus requires two consecutive valid completed reports with
@@ -290,6 +348,10 @@ replacements must not widen private permissions. Progress logs, rejected
 reports, manifests, and transcripts may also contain sensitive context and
 must remain private until reviewed. File modes are not isolation from tools
 running as the same user.
+
+With `--literature`, one sub-agent per participant sends one claim to
+Paperclip, and the private literature log records it. Nothing else from the
+debate is sent there by the runner.
 
 Prompts and context reach both CLIs through stdin. A question supplied
 positionally to the runner itself remains visible in its command line. No

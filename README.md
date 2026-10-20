@@ -25,8 +25,10 @@ or provider-side session persistence.
 Participants may use ordinary tools, but the debate prompt forbids recursive
 consensus runs and calls to another model in research, recovery, compression,
 and synthesis. Sub-agents are forbidden by default; `--subagents N` allows up to
-N concurrent same-model sub-agents in research turns only. Context and peer
-reports are evidence, not permission to expand the task.
+N concurrent same-model sub-agents in research turns only. `--literature` lets
+one of those sub-agents per participant make one Paperclip Evidence API call in
+the opening round. Context and peer reports are evidence, not permission to
+expand the task.
 
 ## Install one authoritative checkout
 
@@ -126,6 +128,14 @@ Run `consensus --help` for the complete CLI reference. Important options are:
 - `--subagents N`: let each participant run up to N concurrent same-model
   sub-agents during research turns; default 0, which forbids them. Recovery,
   compression, and synthesis never get sub-agents;
+- `--literature`: in each participant's opening turn, let one research
+  sub-agent send one claim to the [Paperclip](https://paperclip.gxl.ai/evidence)
+  Evidence API. It returns published passages that support or refute the claim,
+  judged by Paperclip's trained model and ranked by confidence, study design,
+  and citations. One call per participant per debate. Useful when the question
+  is empirical. Requires `--subagents N` with N >= 1 and a Paperclip API key in
+  `PAPERCLIP_API_KEY` (create one at https://paperclip.gxl.ai/keys). The claim
+  is sent to Paperclip and logged privately; see `references/OPERATIONS.md`;
 - `--think TOKENS`: aggregate Claude thinking ceiling across research tranches
   and the initial synthesis; default 42000;
 - `--claude-tranche-think TOKENS`: per-call thinking cap; default 7000;
@@ -152,8 +162,8 @@ Run `consensus --help` for the complete CLI reference. Important options are:
 ## Browser GUI
 
 `gui/consensus_gui.py` is a small local web app around the same runner. It uses
-only the Python standard library and never calls a model itself. Link it next
-to the runner and start it:
+only the Python standard library; debates always go through the unchanged
+runner. Link it next to the runner and start it:
 
 ```bash
 ln -s "$CONSENSUS_REPO/gui/consensus_gui.py" ~/.local/bin/consensus-gui
@@ -161,7 +171,8 @@ consensus-gui            # opens http://127.0.0.1:8765/?t=<token>
 ```
 
 The page starts debates (question, context files, rounds, first speaker,
-sub-agents, synthesis) and can stop a running one (SIGTERM, which the runner
+sub-agents, synthesis, and the opening-round Evidence API call, which needs at
+least one sub-agent and `PAPERCLIP_API_KEY` in the GUI's environment) and can stop a running one (SIGTERM, which the runner
 handles like Ctrl-C). Each debate's page shows its configuration, then a live
 panel that follows the debate as it unfolds: Claude's text streams in as it is
 written, Codex's messages appear item by item, and thinking and tool calls
@@ -193,6 +204,28 @@ The server listens only on `127.0.0.1` and requires the per-launch token in the
 printed URL; it also rejects foreign `Host` and `Origin` headers, so other web
 pages cannot start paid runs. Debates run in their own session: stopping the
 GUI leaves them running, and reopening it shows them again.
+
+### Constructing proofs with proof-craft
+
+The form's **Construct a proof** mode writes a new proof instead of reviewing
+one. A single model call receives the installed
+[proof-craft](https://github.com/fitelson/proof-craft) skill (`SKILL.md`,
+`REFERENCE.md`, and every `references/*.md` file, inlined exactly as installed),
+any context files, and the statement, and returns a paper-ready Markdown proof,
+a counterexample, or a precise statement of the remaining gap. proof-craft does
+not fix a model, so each run picks Claude or Codex, starting from the runner's
+defaults. Review/debate mode is unchanged.
+
+The GUI looks for proof-craft at `~/.claude/skills/proof-craft`, then
+`~/.codex/skills/proof-craft`, then a `proof-craft` checkout beside this
+repository; `--proof-craft PATH` or `CONSENSUS_GUI_PROOF_CRAFT` overrides that.
+Each proof call runs in a detached worker that survives closing the GUI, uses
+the runner's CLI flags for the chosen model and effort, and is capped at
+`CONSENSUS_GUI_PROOF_TIMEOUT` seconds (default 3600). Claude runs with skills and
+the Agent tool disabled; both prompts forbid starting a debate or calling
+another model. The run folder keeps the exact prompt, a private stream journal
+(shown in the live panel), `proof.md`, and the proof-craft file list and
+`REFERENCE.md` SHA-256 in `run.json`, all mode `0600`.
 
 ## Durability and convergence
 

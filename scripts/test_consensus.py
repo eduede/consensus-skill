@@ -85,7 +85,60 @@ if call_log:
             "background_disabled": os.environ.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"),
             "subagent_rule": "- Sub-agents:" in prompt,
             "forbids_subagents": "delegate your role to a sub-agent" in prompt,
+            "literature_open": "- Literature (opening round only)" in prompt,
+            "literature_closed": "no longer available" in prompt,
         }) + "\n")
+
+def paperclip_session(who, command, args, direct):
+    """Act like a literature sub-agent (or a misbehaving parent) on the real helper."""
+    import subprocess as sp
+    revoke = args[args.index("--revoke") + 1]
+    if direct:
+        for _ in range(100):  # the runner revokes once it sees the direct call
+            if os.path.exists(revoke):
+                break
+            time.sleep(0.05)
+    call = lambda n, claim: {"jsonrpc": "2.0", "id": n, "method": "tools/call", "params": {
+        "name": "paperclip_evidence", "arguments": {"claim": claim}}}
+    messages = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        call(2, "Statin therapy increases new-onset diabetes risk " + who),
+        call(3, "A second claim that must be refused " + who)]
+    proc = sp.Popen([command] + args, stdin=sp.PIPE, stdout=sp.PIPE, text=True)
+    out, _ = proc.communicate("".join(json.dumps(m) + "\n" for m in messages), timeout=20)
+    replies = [json.loads(line)["result"] for line in out.splitlines()][1:]
+    results = os.environ.get("FAKE_LITERATURE_RESULTS")
+    if results:
+        with open(results, "a", encoding="utf-8") as handle:
+            for n, result in enumerate(replies, 1):
+                handle.write(json.dumps({"who": who, "call": n, "direct": direct,
+                                         "revoked_seen": os.path.exists(revoke),
+                                         "isError": result["isError"],
+                                         "text": result["content"][0]["text"]}) + "\n")
+
+if mode.startswith("literature") and not is_synthesis and not recovery:
+    opening = "- Literature (opening round only)" in prompt
+    if "--agents" in sys.argv:
+        with open(sys.argv[sys.argv.index("--agents") + 1], encoding="utf-8") as handle:
+            server = json.load(handle)["literature"]["mcpServers"][0]["paperclip"]
+        direct = mode == "literature_direct"
+        tool = {"type": "tool_use", "id": "lit-1", "name": "mcp__paperclip__paperclip_evidence",
+                "input": {"claim": "statins raise diabetes risk"}}
+        if direct:
+            print(json.dumps({"type": "assistant", "message": {"content": [tool]}}), flush=True)
+        else:
+            print(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "agent-1", "name": "Agent",
+                 "input": {"subagent_type": "literature"}}]}}), flush=True)
+            print(json.dumps({"type": "assistant", "parent_tool_use_id": "agent-1",
+                              "message": {"content": [tool]}}), flush=True)
+        paperclip_session("Claude", server["command"], server["args"], direct)
+    if opening:
+        answer("DISAGREE", "literature evidence gathered")
+    else:
+        answer("AGREE", "evidence already cited")
+    raise SystemExit(0)
 
 if is_synthesis and mode == "synthesis_success":
     plain("Mock synthesis success.")
@@ -193,7 +246,48 @@ if call_log:
             "argv": sys.argv[1:],
             "prompt_length": len(prompt),
             "subagent_rule": "- Sub-agents:" in prompt,
+            "literature_open": "- Literature (opening round only)" in prompt,
+            "literature_closed": "no longer available" in prompt,
         }) + "\n")
+
+def paperclip_session(who, command, args, direct):
+    """Act like a literature sub-agent (or a misbehaving parent) on the real helper."""
+    import subprocess as sp
+    revoke = args[args.index("--revoke") + 1]
+    if direct:
+        for _ in range(100):  # the runner revokes once it sees the direct call
+            if os.path.exists(revoke):
+                break
+            time.sleep(0.05)
+    call = lambda n, claim: {"jsonrpc": "2.0", "id": n, "method": "tools/call", "params": {
+        "name": "paperclip_evidence", "arguments": {"claim": claim}}}
+    messages = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        call(2, "Statin therapy increases new-onset diabetes risk " + who),
+        call(3, "A second claim that must be refused " + who)]
+    proc = sp.Popen([command] + args, stdin=sp.PIPE, stdout=sp.PIPE, text=True)
+    out, _ = proc.communicate("".join(json.dumps(m) + "\n" for m in messages), timeout=20)
+    replies = [json.loads(line)["result"] for line in out.splitlines()][1:]
+    results = os.environ.get("FAKE_LITERATURE_RESULTS")
+    if results:
+        with open(results, "a", encoding="utf-8") as handle:
+            for n, result in enumerate(replies, 1):
+                handle.write(json.dumps({"who": who, "call": n, "direct": direct,
+                                         "revoked_seen": os.path.exists(revoke),
+                                         "isError": result["isError"],
+                                         "text": result["content"][0]["text"]}) + "\n")
+
+configs = dict(value.split("=", 1) for flag, value in zip(sys.argv, sys.argv[1:])
+               if flag == "--config" and "=" in value)
+if "mcp_servers.paperclip.command" in configs:
+    direct = os.environ.get("FAKE_CODEX_LITERATURE") == "direct"
+    if direct:
+        print(json.dumps({"type": "item.started", "item": {"id": "item_9", "type": "mcp_tool_call",
+            "server": "paperclip", "tool": "paperclip_evidence", "arguments": {"claim": "x"},
+            "status": "in_progress"}}), flush=True)
+    paperclip_session("Codex", json.loads(configs["mcp_servers.paperclip.command"]),
+                      json.loads(configs["mcp_servers.paperclip.args"]), direct)
 pid_file = os.environ.get("FAKE_CODEX_PID_FILE")
 if pid_file:
     with open(pid_file, "w", encoding="utf-8") as handle:
@@ -226,6 +320,8 @@ with open(out, "w", encoding="utf-8") as handle:
     report = f"CHECKPOINT\nelapsed: 1s\ntentative_verdict: testing\nnew_results: {progress}\ncurrent_obstruction: none\nnext_bounded_step: done\ntoken_cost: unavailable\nEND CHECKPOINT\nMock Codex report.\n{verdict}\n"
     if mode == "missing_checkpoint":
         report = "I endorse the answer.\nVERDICT: AGREE\n"
+    if mode == "literature" and "- Literature (opening round only)" in prompt:
+        report = report.replace("VERDICT: AGREE", "VERDICT: DISAGREE")
     if mode == "oversize_once" and "resume" not in sys.argv:
         report = report.replace("Mock Codex report.", "x" * 50000)
     handle.write(report)
@@ -298,6 +394,159 @@ def run_case(root, fake_bin, name, mode, extra_args=None, *, synthesize=False,
         rows,
         transcript.read_text(encoding="utf-8") if (transcript := save).exists() else "",
     )
+
+
+def fake_paperclip():
+    """A local stand-in for the Paperclip API that records every request."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body})
+            paper = {"id": "PMC111", "title": "Statins and incident diabetes", "doi": "10.1/111",
+                     "pmid": "111", "year": 2010, "design": "meta_analysis", "citations": 900,
+                     "retracted": False}
+            data = json.dumps({"id": "req_1", "object": "claim_evidence", "claim": body["claim"],
+                               "model_version": "gxl-evidence-offline",
+                               "counts": {"retrieved": 10, "supports": 1, "refutes": 0},
+                               "supports": [{"evidence": "Statins modestly raised risk.",
+                                             "confidence": 0.97, "paper": paper}],
+                               "refutes": [], "timing_ms": {"total": 1}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
+
+
+def literature_cases(root, fake_bin):
+    """--literature: one Evidence API call per participant, by a sub-agent, in round 1."""
+    # Defaults stay byte-for-byte free of Paperclip.
+    default_claude = json.loads((root / "latest-claude.jsonl").read_text().splitlines()[0])
+    default_codex = json.loads((root / "latest-codex.jsonl").read_text().splitlines()[0])
+    assert "--agents" not in default_claude["argv"] and not default_claude["literature_open"]
+    assert not any("mcp_servers." in arg for arg in default_codex["argv"])
+    assert json.loads((root / "latest-high-defaults.progress.md.protocol.json")
+                      .read_text())["literature"] == {"enabled": False}
+
+    # Preflight refusals happen before any artifact or provider call.
+    no_key = {k: v for k, v in os.environ.items() if k != "PAPERCLIP_API_KEY"}
+    for args, env, reason in ((["--literature"], {**no_key, "PAPERCLIP_API_KEY": "k"}, "--subagents N"),
+                              (["--literature", "--subagents", "1"], no_key, "PAPERCLIP_API_KEY")):
+        refused = subprocess.run([str(RUNNER), *args, "--save", str(root / "refused.md"), "q"],
+                                 capture_output=True, text=True, env=env)
+        assert refused.returncode == 2 and reason in refused.stderr, refused.stderr
+        assert not (root / "refused.md").exists()
+
+    server, seen = fake_paperclip()
+    try:
+        env = {"PAPERCLIP_API_KEY": "gxl_offline_key",
+               "CONSENSUS_PAPERCLIP_BASE_URL": f"http://127.0.0.1:{server.server_address[1]}",
+               "FAKE_CODEX_MODE": "literature"}
+        claude_log, codex_log = root / "lit-claude.jsonl", root / "lit-codex.jsonl"
+        results = root / "lit-results.jsonl"
+        progress, _, transcript = run_case(
+            root, fake_bin, "literature", "literature", max_rounds=2,
+            extra_args=["--subagents", "2", "--literature"],
+            extra_env={**env, "FAKE_CLAUDE_CALL_LOG": str(claude_log),
+                       "FAKE_CODEX_CALL_LOG": str(codex_log),
+                       "FAKE_LITERATURE_RESULTS": str(results)})
+        assert "CONSENSUS REACHED" in transcript, transcript
+        claude_calls = [json.loads(line) for line in claude_log.read_text().splitlines()]
+        codex_calls = [json.loads(line) for line in codex_log.read_text().splitlines()]
+        assert len(claude_calls) == 2 and len(codex_calls) == 2, (claude_calls, codex_calls)
+        # Opening round: the rule and the Paperclip wiring, for both participants.
+        opening_claude, later_claude = claude_calls
+        assert opening_claude["literature_open"] and not opening_claude["literature_closed"]
+        argv = opening_claude["argv"]
+        assert argv[argv.index("--allowedTools") + 1] == "mcp__paperclip__paperclip_evidence"
+        assert codex_calls[0]["literature_open"]
+        assert 'mcp_servers.paperclip.default_tools_approval_mode="approve"' in codex_calls[0]["argv"]
+        assert 'mcp_servers.paperclip.env_vars=["PAPERCLIP_API_KEY"]' in codex_calls[0]["argv"]
+        # Later rounds: no wiring, and the prompt says the window has closed.
+        assert later_claude["literature_closed"] and not later_claude["literature_open"]
+        assert "--agents" not in later_claude["argv"] and "--allowedTools" not in later_claude["argv"]
+        assert codex_calls[1]["literature_closed"] and "resume" in codex_calls[1]["argv"]
+        assert not any("mcp_servers." in arg for arg in codex_calls[1]["argv"])
+        # Each participant's sub-agent reached the Evidence API exactly once; the second is refused.
+        assert [r["path"] for r in seen] == ["/claims/support"] * 2, seen
+        assert sorted(r["body"]["claim"] for r in seen) == [
+            "Statin therapy increases new-onset diabetes risk Claude",
+            "Statin therapy increases new-onset diabetes risk Codex"], seen
+        assert all(r["auth"] == "Bearer gxl_offline_key" and r["body"]["include_context"] is False
+                   for r in seen)
+        outcomes = [json.loads(line) for line in results.read_text().splitlines()]
+        assert sorted((o["who"], o["call"], o["isError"]) for o in outcomes) == [
+            ("Claude", 1, False), ("Claude", 2, True), ("Codex", 1, False), ("Codex", 2, True)]
+        for o in outcomes:
+            assert ("10.1/111" in o["text"]) if o["call"] == 1 else ("already been used" in o["text"])
+        log = Path(str(root / "literature.progress.md") + ".literature.jsonl")
+        assert stat.S_IMODE(log.stat().st_mode) == 0o600
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        assert sorted((r["participant"], r["status"]) for r in rows) == [
+            ("Claude", "ok"), ("Claude", "refused"), ("Codex", "ok"), ("Codex", "refused")]
+        assert "gxl_offline_key" not in log.read_text()
+        assert progress.count("literature round finished") == 2
+        assert ("requests: 2 (ok 1, errors 0, refused as over budget 1, refused after revocation 0, "
+                "invalid 0)") in progress
+        assert "literature access revoked" not in progress
+        manifest = json.loads(Path(str(root / "literature.progress.md") + ".protocol.json").read_text())
+        assert manifest["literature"]["enabled"] and manifest["literature"]["round"] == 1
+        assert manifest["literature"]["access"] == "research sub-agents only"
+        assert manifest["literature"]["direct_call_revocations"] == {"Claude": 0, "Codex": 0}
+        assert manifest["literature"]["log"] == str(log)
+        assert manifest["literature"]["tools"] == ["paperclip_evidence"]
+        assert manifest["literature"]["calls_per_participant"] == 1
+
+        # A participant calling Paperclip itself is logged, revoked, and the debate goes on.
+        seen.clear()
+        results = root / "lit-direct-results.jsonl"
+        progress, _, transcript = run_case(
+            root, fake_bin, "literature-direct", "literature_direct", max_rounds=2,
+            extra_args=["--subagents", "1", "--literature"],
+            extra_env={**env, "FAKE_CODEX_LITERATURE": "direct",
+                       "FAKE_LITERATURE_RESULTS": str(results)})
+        assert "CONSENSUS REACHED" in transcript, transcript
+        outcomes = [json.loads(line) for line in results.read_text().splitlines()]
+        assert len(outcomes) == 4
+        for o in outcomes:
+            assert o["revoked_seen"] and o["isError"] and "revoked" in o["text"], o
+        for who in ("Claude", "Codex"):
+            assert f"{who} literature access revoked" in progress
+        assert not seen, "a revoked call reached Paperclip"
+        assert "refused after revocation 2" in progress
+        manifest = json.loads(Path(str(root / "literature-direct.progress.md")
+                                   + ".protocol.json").read_text())
+        assert manifest["literature"]["direct_call_revocations"] == {"Claude": 1, "Codex": 1}
+
+        # Recovery in the opening round never receives Paperclip.
+        claude_log, codex_log = root / "lit-recovery-claude.jsonl", root / "lit-recovery-codex.jsonl"
+        recovery_progress, _, _ = run_case(
+            root, fake_bin, "literature-recovery", "timeout_recover",
+            extra_args=["--subagents", "2", "--literature"],
+            extra_env={**env, "FAKE_CLAUDE_CALL_LOG": str(claude_log),
+                       "FAKE_CODEX_CALL_LOG": str(codex_log), "FAKE_CODEX_MODE": "oversize_once"})
+        assert recovery_progress.count("recovery: yes") >= 2
+        claude_calls = [json.loads(line) for line in claude_log.read_text().splitlines()]
+        codex_calls = [json.loads(line) for line in codex_log.read_text().splitlines()]
+        assert "--agents" in claude_calls[0]["argv"] and claude_calls[0]["literature_open"]
+        assert claude_calls[1]["recovery"] and "--agents" not in claude_calls[1]["argv"]
+        assert claude_calls[1]["literature_closed"] and not claude_calls[1]["literature_open"]
+        assert any("mcp_servers.paperclip" in arg for arg in codex_calls[0]["argv"])
+        assert "resume" in codex_calls[1]["argv"]
+        assert not any("mcp_servers." in arg for arg in codex_calls[1]["argv"])
+    finally:
+        server.shutdown()
 
 
 def main():
@@ -485,6 +734,8 @@ def main():
         rejected = subprocess.run([str(RUNNER), "--subagents", "-1", "--no-save", "q"],
                                   capture_output=True, text=True)
         assert rejected.returncode == 2 and "nonnegative" in rejected.stderr
+
+        literature_cases(root, fake_bin)
         mixed = "\n".join(json.dumps(event) for event in (
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "parent"}]}},
             {"type": "assistant", "parent_tool_use_id": "offline-agent",
